@@ -16,7 +16,7 @@ import tomllib
 
 from platform_fs import reject_linked_path, write_atomic, private_directory, default_destination
 
-VERSION = "0.1.0-pre4"
+VERSION = "0.1.0-pre5"
 START = "# BEGIN CODEX CONTEXT FOUNDATION (managed)"
 END = "# END CODEX CONTEXT FOUNDATION (managed)"
 SERVER = "context_foundation"

@@ -7,7 +7,7 @@ import zipfile
 
 from install import VERSION
 
-FILES = ("context_service.py", "platform_fs.py", "foundation.py", "lifecycle.py", "install.py", "README.md", "LICENSE", "test_context_service.py", "test_foundation.py", "test_install.py", "test_lifecycle.py", "test_platform_fs.py", "test_portability.py")
+FILES = ("context_service.py", "platform_fs.py", "foundation.py", "lifecycle.py", "install.py", "README.md", "LICENSE", "test_context_service.py", "test_foundation.py", "test_install.py", "test_lifecycle.py", "test_platform_fs.py", "test_portability.py", "test_retrieval.py")
 
 
 def build(source: Path, output: Path) -> dict:

@@ -34,6 +34,13 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cwd"):
             handle(self.event("SessionStart", cwd=str(self.base)), self.state, self.root)
 
+    def test_routing_preserves_memory_and_requires_complete_evidence(self):
+        text = self.invoke("SessionStart")["hookSpecificOutput"]["additionalContext"]
+        for rule in ("local read/rg", "decisions or unfinished work", "continuation/read full sources",
+                     "sources remain unchanged", "context_record", "Never repeat an operation with unknown outcome"):
+            self.assertIn(rule, text)
+        self.assertLess(len(text), 1400)
+
     def test_identifiers_cannot_inject_context(self):
         with self.assertRaises(ValueError):
             self.invoke("SessionStart", session_id="malformed\ncontext")

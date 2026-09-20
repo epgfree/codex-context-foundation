@@ -2,7 +2,7 @@
 
 Independent, local-first project memory and bounded retrieval for Codex. Not an official OpenAI product.
 
-**Pre4 is a cross-platform pilot.** Native Windows, Linux and macOS passed the [six-job acceptance matrix](https://github.com/epgfree/codex-context-foundation/actions/runs/35506131849) on Python 3.11 and 3.14. This verifies the package and its tests, not a full Codex desktop session on every OS. No measured subscription-quota savings are promised.
+**Pre5 is a locally validated retrieval pilot.** macOS/Python 3.14 completed 130 discovered tests (110 executed, 20 Windows-specific skips) and the packaged integration scenario, including paged search/read across process restarts. The previous pre4 release passed the [six-job acceptance matrix](https://github.com/epgfree/codex-context-foundation/actions/runs/35506131849) on Windows, Linux and macOS with Python 3.11 and 3.14. That result does not qualify pre5 on those platforms or prove full Codex desktop integration. No measured subscription-quota savings are promised.
 
 ## What it does
 
@@ -24,7 +24,7 @@ Existing wiki/source documents remain authoritative. No projects, conversations,
 
 ## Install
 
-Download [the pre4 installation ZIP](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre4.zip), compare its SHA-256 with [SHA256SUMS-pre4.txt](https://github.com/epgfree/codex-context-foundation/blob/main/SHA256SUMS-pre4.txt), extract it, and open a terminal inside its `codex-context-foundation` directory. The older pre3 archive is retained for reference and does not support native Windows. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
+Download [the latest pre5 installation ZIP](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre5.zip) and verify [SHA256SUMS-pre5.txt](https://github.com/epgfree/codex-context-foundation/blob/main/SHA256SUMS-pre5.txt). Extract it and run the commands below inside its `codex-context-foundation` folder. The ZIP is the exact locally tested package; its bundled README preserves the documentation snapshot at build time. This repository README carries publication and CI updates. The [pre4 archive](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre4.zip) remains available for rollback. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
 
 Windows (PowerShell):
 
@@ -56,6 +56,18 @@ python3 install.py disconnect
 `doctor` is read-only and does not prove live MCP connectivity or hook trust. `disconnect` removes the managed integration, not state or projects. Old versioned releases are preserved. For a previous release, run its installer with explicit pilot activation and review changed hooks again.
 
 Default paths can be overridden with `--destination` and `--codex-dir`; `CODEX_HOME` is honored. Use separate installations for Windows and WSL. Do not manually share their SQLite state.
+
+## Progressive retrieval (pre5)
+
+- Prefer bounded local file reads or literal search for a known path, name or string. Use memory retrieval for project decisions and unfinished work; choosing local search does not disable saving decisions/checkpoints.
+- `context_search` defaults to three previews. When `has_more` is true, repeat the same query with the returned `cursor`. For an exhaustive request, a larger explicit `limit` (up to 10) can reduce round trips. A preview is not a full document.
+- `context_read` accepts a source `path` or a legacy database `note_id`. It returns `text`, a source `revision`, `next` and `end`. Concatenate text pages without trimming. Repeat with the same source and `cursor=next` until `end=true`; the default page is 2,000 Unicode characters, at most 8,000. Legacy-note pages concatenate to JSON containing the persistent note fields.
+- Continuations are bound to the project/request and source content. Edits, deletion or unavailable sources cause an explicit restart requirement, not a silent mixture of old and new pages. Restart retrieval and recheck decisions based on the old evidence.
+- `has_more=false` only exhausts matching indexed records. `coverage.coverage_limited`, skipped files and source-change warnings still apply; absence of a result is not proof of absence. Files outside the approved scope or size budget remain unavailable through this tool.
+- Full canonical documents stay on disk. Existing notes, ownership, checkpoints and uncertain-operation protections are retained. There is no automatic summary replacement or imported conversation history.
+- Index freshness still verifies source contents. No mtime-only cache was added; filesystem protections take precedence over faster repeated scans.
+
+Developer comparisons: `python3 compare_retrieval.py --baseline /path/to/extracted/pre4 --evidence /path/to/report.json` and `python3 check_retrieval.py --evidence /path/to/literal-report.json`. Fixtures are synthetic and isolated. Report first-page and exhaustive payloads, round trips, startup context and tool-catalog overhead separately. Bytes are not model tokens, cached-input charges, subscription limits or end-to-end answer-quality evidence.
 
 ## Validation
 

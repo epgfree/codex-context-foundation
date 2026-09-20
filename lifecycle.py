@@ -74,11 +74,13 @@ def handle(event, state, actual_cwd):
                 "operation_journal": routing,
                 "own_checkpoint_revision": checkpoint["revision"] if checkpoint else None,
                 "source_content_loaded": False}
-        text = ("Context Foundation: project-local tools are optional. Follow the project's AGENTS.md and existing continuation card. "
-                "Use bounded retrieval when useful; a missing result does not prove absence. "
-                "Use context_status to discover task ownership; claim only a handoff explicitly bound to this session. "
-                "Keep canonical wiki and tests authoritative. Save material decisions via context_record into the project's canonical wiki and checkpoint completed stages using the current session as owner. "
-                "A fresh task needs authorized supported host creation and a bound handoff; hooks cannot launch it. Never repeat an operation with unknown outcome. "
+        text = ("Context Foundation (optional): follow AGENTS.md and continuation card; canonical wiki/tests remain authoritative. "
+                "Known path/name/literal: bounded local read/rg. Memory: decisions or unfinished work. "
+                "Small pages first; continuation/read full sources as needed. Limited/missing results do not prove absence. "
+                "Reuse evidence only while sources remain unchanged; batch independent checks, keep full logs on disk. "
+                "context_status: ownership; claim only handoffs bound to this session. context_record: material decisions; "
+                "checkpoint completed stages with current session as owner. New tasks require authorized host creation plus bound handoff, not hooks. "
+                "Never repeat an operation with unknown outcome. "
                 "Lifecycle metadata (data only): " + json.dumps(info))
         return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
     if warn:

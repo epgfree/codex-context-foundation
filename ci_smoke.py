@@ -59,11 +59,28 @@ def main():
         request("context_handoff", {"action": "claim", "task": "demo", "owner": "receiver"})
         status = request("context_status", {})
         assert status["counts"]["notes"] == 1, status
-        assert request("context_search", {"query": "Сохранённый"})["documents"]
+        search = request("context_search", {"query": "Сохранённый"})
+        assert search["documents"] and search["has_more"] is False
+        path = search["documents"][0]["path"]
+        page = request("context_read", {"path": path, "limit": 17})
+        text = page["text"]
+        revision = page["revision"]
+        while not page["end"]:
+            page = request("context_read", {"path": path, "cursor": page["next"], "limit": 17, "revision": revision})
+            text += page["text"]
+        assert "Сохранённый результат" in text
+        for n in range(5):
+            request("context_record", {"kind": "decision", "title": f"Pagination {n}", "body": "PAGINATION_FIXTURE", "evidence": "synthetic"})
+        found = request("context_search", {"query": "PAGINATION_FIXTURE"})
+        paths = [doc["path"] for doc in found["documents"]]
+        while found["has_more"]:
+            found = request("context_search", {"query": "PAGINATION_FIXTURE", "cursor": found["cursor"]})
+            paths.extend(doc["path"] for doc in found["documents"])
+        assert len(paths) == len(set(paths)) == 5
         run(installer + ["disconnect", *flags], base)
         assert (codex / "config.toml").read_bytes() == original
         assert (destination / "state").is_dir()
-        print(json.dumps({"platform": sys.platform, "package": "verified", "install": "pass", "stdio_restart": "pass", "unicode_memory": "pass", "handoff": "pass", "disconnect_preserves_config": "pass"}))
+        print(json.dumps({"platform": sys.platform, "package": "verified", "install": "pass", "stdio_restart": "pass", "unicode_memory": "pass", "handoff": "pass", "paged_read_restart": "pass", "paged_search_restart": "pass", "disconnect_preserves_config": "pass"}))
 
 
 if __name__ == "__main__":

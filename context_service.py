@@ -5,8 +5,11 @@ Serena is intentionally NOT a dependency of the baseline service.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from contextlib import contextmanager
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,7 +23,7 @@ from foundation import Health, app_version, project_key, project_root
 from platform_fs import (create_file, database_guard, is_directory, list_directory,
                          private_directory, read_file, reject_linked_path, relative_parts)
 
-VERSION = "0.1.0-pre4"
+VERSION = "0.1.0-pre5"
 SKIP = {".git", ".env", ".venv", "node_modules", "dist", "build", "data", "private", "secrets", "reports", "coverage", "__pycache__", ".promotion"}
 DOC_ROOTS = ("docs", "knowledge", "wiki")
 CODE_ROOTS = ("src", "backend/src", "backend/tests", "apps/web/src", "scripts", "tests")
@@ -28,6 +31,45 @@ ROOT_DOCS = {"README.md", "AGENTS.md", "HANDOFF.md", "CURRENT_WORK.md"}
 MAX_FILE = 256 * 1024
 MAX_FILES = 2000
 MAX_INDEX_BYTES = 8 * 1024 * 1024
+
+
+def compact_json(value):
+    """Use separately for model-visible content and the outer JSON-RPC envelope."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+class ContinuationError(ValueError):
+    """The caller must restart rather than merge pages from different snapshots."""
+
+
+def page_limit(value, maximum):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("Page limit must be a positive integer")
+    return min(value, maximum)
+
+
+def preview_excerpt(text, start_marker, end_marker, maximum=300):
+    """Keep the first FTS hit when bounding characters, not merely token count.
+
+    Unique internal markers distinguish real hits from brackets in source text.
+    A single token can itself exceed the entire budget; that exceptional case
+    is explicitly truncated and remains fully accessible with context_read.
+    """
+    start = text.find(start_marker)
+    finish = text.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+    rendered = text.replace(start_marker, "[").replace(end_marker, "]")
+    if len(rendered) <= maximum:
+        return rendered, False
+    budget = maximum - 2  # Reserve both boundary ellipses.
+    if start >= 0 and finish >= 0:
+        end = finish - len(start_marker) + 2
+        if end - start > budget:
+            return rendered[start:start + maximum - 1] + "…", True
+        low = max(0, start - 60, end - budget)
+    else:
+        low = 0
+    high = min(len(rendered), low + budget)
+    return ("…" if low else "") + rendered[low:high] + ("…" if high < len(rendered) else ""), True
 
 
 def bounded(value, name, maximum=4000):
@@ -139,6 +181,12 @@ class Project:
             if saved and saved[0] != str(self.root):
                 raise ValueError("Project identity mismatch")
             db.execute("INSERT OR IGNORE INTO meta VALUES ('root', ?)", (str(self.root),))
+            # Persist only cursor authentication material, never a result cache.
+            # Existing pre4 data/schema and record identities remain unchanged.
+            db.execute("INSERT OR IGNORE INTO meta VALUES ('_cf_cursor_key_v1', ?)", (os.urandom(32).hex(),))
+            self._cursor_key = bytes.fromhex(db.execute("SELECT value FROM meta WHERE key='_cf_cursor_key_v1'").fetchone()[0])
+            if len(self._cursor_key) != 32:
+                raise ValueError("Invalid cursor authentication state")
 
     def repository_identity(self):
         """Resolve only Git metadata, never run hooks or read another worktree's code.
@@ -229,37 +277,141 @@ class Project:
                 "serena": "disabled_unqualified", "project_data_imported": False,
                 "automatic_thread_creation": "host_agent_required", "scope": {"docs": DOC_ROOTS, "code": CODE_ROOTS}}
 
-    def search(self, query: str, limit=5):
+    def _cursor(self, kind, binding, fingerprint, offset):
+        # 42-byte payload + 16-byte MAC => 78 ASCII characters. No paths, bodies,
+        # or raw query text travel in a cursor. The key survives service restarts.
+        data = b"\x01" + kind.encode("ascii") + offset.to_bytes(8, "big") + bytes.fromhex(fingerprint)
+        context = compact_json([str(self.root), kind, binding]).encode("utf-8")
+        tag = hmac.digest(self._cursor_key, context + data, "sha256")[:16]
+        return base64.urlsafe_b64encode(data + tag).decode("ascii").rstrip("=")
+
+    def _continuation(self, cursor, kind, binding):
+        try:
+            if not isinstance(cursor, str) or len(cursor) != 78:
+                raise ValueError
+            raw = base64.b64decode(cursor + "==", altchars=b"-_", validate=True)
+            data, tag = raw[:-16], raw[-16:]
+            context = compact_json([str(self.root), kind, binding]).encode("utf-8")
+            if (len(data) != 42 or data[:2] != b"\x01" + kind.encode("ascii")
+                    or not hmac.compare_digest(tag, hmac.digest(self._cursor_key, context + data, "sha256")[:16])):
+                raise ValueError
+            return data[10:].hex(), int.from_bytes(data[2:10], "big")
+        except (ValueError, TypeError, UnicodeError, binascii.Error) as exc:
+            raise ContinuationError("Invalid cursor for this project/request; restart required") from exc
+
+    def _corpus_fingerprint(self, db, coverage):
+        """Hash the refreshed indexed corpus plus every legacy note, streaming rows.
+
+        This deliberately rescans; no stat-based incremental freshness claims.
+        A stable ordering is essential both here and when resolving tied ranks.
+        """
+        digest = hashlib.sha256()
+        for row in db.execute("SELECT path,digest FROM hashes ORDER BY path COLLATE BINARY"):
+            digest.update(compact_json(["d", *row]).encode("utf-8") + b"\n")
+        for row in db.execute("SELECT id,kind,title,body,evidence,created FROM notes WHERE NOT EXISTS (SELECT 1 FROM note_sources WHERE note_sources.id=notes.id) ORDER BY id COLLATE BINARY"):
+            digest.update(compact_json(["n", *row]).encode("utf-8") + b"\n")
+        digest.update(compact_json(coverage).encode("utf-8"))
+        return digest.hexdigest()
+
+    def search(self, query: str, limit=3, cursor=None):
         words = re.findall(r"[^\W_]+", bounded(query, "query", 300), flags=re.UNICODE)
         if not words:
             raise ValueError("No searchable terms")
-        limit = max(1, min(int(limit), 10))
-        coverage = self.refresh()
-        expression = " OR ".join('"' + word.replace('"', '""') + '"' for word in words[:20])
+        limit = page_limit(limit, 10)
+        binding = words
+        prior, offset = self._continuation(cursor, "s", binding) if cursor is not None else (None, 0)
+        refreshed = self.refresh()
+        coverage = {key: refreshed[key] for key in ("coverage_limited", "skipped_files")}
+        if coverage["coverage_limited"]:
+            coverage.update({key: refreshed[key] for key in ("indexed_files", "byte_budget")})
+        expression = " OR ".join('"' + word + '"' for word in words)
+        folded = tuple(word.casefold() for word in words)
+        marker = os.urandom(12).hex()
+        start_marker, end_marker = f"\x01{marker}\x02", f"\x03{marker}\x04"
         with self.db() as db:
-            rows = db.execute("SELECT docs.path,snippet(docs,1,'[',']','…',48) AS excerpt, hashes.digest FROM docs JOIN hashes ON hashes.path=docs.path WHERE docs MATCH ? ORDER BY bm25(docs) LIMIT ?", (expression, limit)).fetchall()
-            # Small append-only local notes store; lexical matching, no claimed semantic search.
-            notes = db.execute("SELECT notes.id,kind,title,body,evidence,note_sources.path,note_sources.digest FROM notes LEFT JOIN note_sources ON notes.id=note_sources.id ORDER BY created DESC LIMIT 500").fetchall()
+            fingerprint = self._corpus_fingerprint(db, coverage)
+            if prior is not None and prior != fingerprint:
+                raise ContinuationError("Corpus changed; restart search without cursor")
+            # Match before LIMIT, without an arbitrary 500-row candidate cutoff.
+            # Python casefold preserves the pre4 Unicode substring note semantics.
+            db.create_function("cf_note_match", 2, lambda title, body: int(any(word in (title + " " + body).casefold() for word in folded)))
+            count = db.execute("SELECT count(*) FROM docs WHERE docs MATCH ?", (expression,)).fetchone()[0]
+            rows = db.execute("SELECT docs.path,snippet(docs,1,?,?,'…',24) AS excerpt, hashes.digest FROM docs JOIN hashes ON hashes.path=docs.path WHERE docs MATCH ? ORDER BY bm25(docs), docs.path COLLATE BINARY LIMIT ? OFFSET ?", (start_marker, end_marker, expression, limit + 1, offset)).fetchall()
+            notes = []
+            if len(rows) <= limit:
+                notes = db.execute("SELECT id,kind,title,body,evidence FROM notes WHERE NOT EXISTS (SELECT 1 FROM note_sources WHERE note_sources.id=notes.id) AND cf_note_match(title,body) ORDER BY created DESC, id COLLATE BINARY LIMIT ? OFFSET ?", (limit + 1 - len(rows), max(0, offset - count))).fetchall()
         results = []
-        for row in rows:
+        for row in rows[:limit]:
             try:
                 current = self.scope.read(row["path"])
                 if hashlib.sha256(current.encode()).hexdigest() != row["digest"]:
-                    # A concurrent edit invalidates this cached excerpt. Next search refreshes it.
-                    coverage["changed_during_query"] = True
-                    continue
+                    raise ValueError("Source changed after refresh")
             except (OSError, ValueError, UnicodeError):
-                continue
-            results.append({"path": row["path"], "excerpt": row["excerpt"]})
-        # Canonical Markdown is returned through the document index, never again as
-        # a stale duplicate of its initial body. Legacy database-only notes remain.
-        matches = [dict(row) for row in notes if row["path"] is None and any(word.casefold() in (row["title"] + " " + row["body"]).casefold() for word in words)][:limit]
-        for row in matches:
-            row.pop("digest", None)
-            row.pop("path", None)
-            row["body"] = row["body"][:1200]
-            row["storage"] = "legacy_database_note"
-        return {"documents": results, "notes": matches, "coverage": coverage, "method": "lexical_not_semantic"}
+                # Preserve the pre4 first-page shape, but make incomplete results
+                # explicit. Never advance a cursor over a failed/changed match.
+                coverage["changed_during_query"] = True
+                coverage["skipped_files"] += 1
+                return {"documents": [], "notes": [], "coverage": coverage, "has_more": False,
+                        "cursor": None, "restart_required": True, "reason": "source_changed_or_unavailable"}
+            excerpt, truncated = preview_excerpt(row["excerpt"], start_marker, end_marker)
+            result = {"path": row["path"], "excerpt": excerpt}
+            if truncated:
+                result["snippet_truncated"] = True
+            results.append(result)
+        matches = []
+        for row in notes[:max(0, limit - len(results))]:
+            note = dict(row)
+            truncated = any(len(note[field]) > size for field, size in (("title", 160), ("body", 240), ("evidence", 160)))
+            for field, size in (("title", 160), ("body", 240), ("evidence", 160)):
+                note[field] = note[field][:size]
+            note["storage"] = "legacy_database_note"
+            if truncated:
+                note["details_truncated"] = True  # context_read(note_id=...) recovers every field.
+            matches.append(note)
+        has_more = len(rows) + len(notes) > limit
+        return {"documents": results, "notes": matches, "coverage": coverage,
+                "has_more": has_more,
+                "cursor": self._cursor("s", binding, fingerprint, offset + len(results) + len(matches)) if has_more else None}
+
+    def read(self, path=None, note_id=None, limit=2000, cursor=None, revision=None):
+        """Read Unicode character pages; concatenate text exactly, without stripping.
+
+        Legacy note text is a complete JSON object (all persistent note fields).
+        Files always use Scope.read; source safety/size limits remain unchanged.
+        """
+        if (path is None) == (note_id is None):
+            raise ValueError("Supply exactly one of path or note_id")
+        limit = page_limit(limit, 8000)
+        binding = [path, note_id]
+        prior, offset = self._continuation(cursor, "r", binding) if cursor is not None else (None, 0)
+        if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)):
+            raise ValueError("Revision must be a SHA-256 digest")
+        try:
+            if path is not None:
+                path = bounded(path, "path", 1000)
+                text = self.scope.read(path, code=not self.scope.permitted(path))
+                reference, format_name = {"path": path}, "text"
+            else:
+                note_id = bounded(note_id, "note_id", 300)
+                with self.db() as db:
+                    row = db.execute("SELECT id,kind,title,body,evidence,created FROM notes WHERE id=? AND NOT EXISTS (SELECT 1 FROM note_sources WHERE note_sources.id=notes.id)", (note_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Legacy note not found; canonical notes must be read by path")
+                text = compact_json(dict(row))
+                reference, format_name = {"note_id": note_id}, "json"
+        except (OSError, ValueError, UnicodeError) as exc:
+            if cursor is not None or revision is not None:
+                raise ContinuationError("Source changed or unavailable; restart read") from exc
+            raise
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if (prior is not None and prior != digest) or (revision is not None and revision != digest):
+            raise ContinuationError("Source revision changed; restart read")
+        if offset > len(text):
+            raise ContinuationError("Read position no longer available; restart read")
+        chunk = text[offset:offset + limit]
+        end = offset + len(chunk) == len(text)
+        return {**reference, "revision": digest, "format": format_name, "text": chunk,
+                "next": None if end else self._cursor("r", binding, digest, offset + len(chunk)), "end": end}
 
     def record(self, kind, title, body, evidence, wiki_directory=None):
         if kind not in {"decision", "constraint", "regression", "research"}:
@@ -376,7 +528,7 @@ class Project:
             db.execute("INSERT INTO events(kind,reference,payload,created) VALUES ('operation',?,?,?)", (key, json.dumps({"action": action, "result": result, "evidence": evidence}), time.time()))
         return {"key": key, "status": "unknown" if action == "intent" else result, "external_action_performed_by_service": False}
 
-    def code(self, name, limit=10):
+    def code(self, name, limit=3):
         name = bounded(name, "name", 100)
         if not re.fullmatch(r"[\w.]+", name):
             raise ValueError("Symbol name only")
@@ -406,15 +558,16 @@ def schema(properties, required=()):
 S = {"type": "string"}
 TOOLS = [
     {"name": "context_status", "description": "Project-local memory status. No source scan or cross-project activation.", "inputSchema": schema({})},
-    {"name": "context_search", "description": "Search allowed project Markdown and evidence-linked notes; bounded excerpts, refreshed on demand.", "inputSchema": schema({"query": S, "limit": {"type": "integer"}}, ["query"])},
-    {"name": "context_code", "description": "Bounded literal symbol search in approved source trees. Not semantic LSP; use normal tools for broader verification.", "inputSchema": schema({"name": S, "limit": {"type": "integer"}}, ["name"])},
+    {"name": "context_search", "description": "Lexical search; 3 previews by default. Follow cursor with the same query; changed corpus requires restart. Use context_read for full content.", "inputSchema": schema({"query": S, "limit": {"type": "integer"}, "cursor": S}, ["query"])},
+    {"name": "context_read", "description": "Read approved source path OR legacy note_id in revision-checked text pages. Follow next until end. Legacy text concatenates to JSON; source to original text.", "inputSchema": schema({"path": S, "note_id": S, "revision": S, "cursor": S, "limit": {"type": "integer"}})},
+    {"name": "context_code", "description": "Literal symbol search; 3 previews by default. limited means incomplete; use normal tools to search further and context_read for full source. Not LSP.", "inputSchema": schema({"name": S, "limit": {"type": "integer"}}, ["name"])},
     {"name": "context_record", "description": "Create an evidence-linked Markdown decision/constraint/regression/research record without overwriting files. Select wiki_directory from project instructions when an existing wiki exists. Evidence is not verified by this tool.", "inputSchema": schema({k: S for k in ["kind", "title", "body", "evidence", "wiki_directory"]}, ["kind", "title", "body", "evidence"])},
     {"name": "context_checkpoint", "description": "Save compact task state using revision check. Existing owner must match; save code/tests separately.", "inputSchema": schema({**{k: S for k in ["task", "owner", "goal", "next_step", "summary", "evidence"]}, "expected_revision": {"type": "integer"}}, ["task", "owner", "goal", "next_step", "summary", "evidence", "expected_revision"])},
     {"name": "context_handoff", "description": "Read or prepare/bind/claim/cancel task handoff. Does not create Codex tasks; host agent must create destination using supported tools.", "inputSchema": schema({k: S for k in ["action", "task", "owner", "target"]}, ["action", "task", "owner"])},
     {"name": "context_operation", "description": "Record intent or resolve confirmed external outcome; rejects repeats and unknown outcomes. Never performs external actions.", "inputSchema": schema({k: S for k in ["action", "key", "description", "result", "evidence"]}, ["action"])},
 ]
 for tool in TOOLS:
-    tool["annotations"] = {"readOnlyHint": tool["name"] in {"context_status", "context_search", "context_code"}, "destructiveHint": False, "openWorldHint": False}
+    tool["annotations"] = {"readOnlyHint": tool["name"] in {"context_status", "context_search", "context_code", "context_read"}, "destructiveHint": False, "openWorldHint": False}
 
 
 def validate_arguments(name, values):
@@ -490,27 +643,32 @@ def serve(state: Path):
                         raise ValueError("No project boundary; normal tools remain available")
                     payload = {"status": "inactive", "reason": startup_reason, "normal_tools_available": True}
                 else:
-                    dispatch = {"context_status": project.status, "context_search": project.search, "context_code": project.code, "context_record": project.record, "context_checkpoint": project.checkpoint, "context_handoff": project.handoff, "context_operation": project.operation}
+                    dispatch = {"context_status": project.status, "context_search": project.search, "context_read": project.read, "context_code": project.code, "context_record": project.record, "context_checkpoint": project.checkpoint, "context_handoff": project.handoff, "context_operation": project.operation}
                     if name not in dispatch:
                         raise ValueError("Unknown tool")
                     try:
                         payload = dispatch[name](**values)
+                    except ContinuationError as exc:
+                        payload = {"restart_required": True, "reason": str(exc), "cursor": None, "next": None, "end": False}
+                        result = {"content": [{"type": "text", "text": compact_json(payload)}], "isError": True}
+                        print(compact_json({"jsonrpc": "2.0", "id": identity, "result": result}), flush=True)
+                        continue
                     except (ValueError, TypeError, KeyError, OSError, sqlite3.Error):
                         # Tool/domain errors are MCP results, not invalid JSON-RPC requests.
                         result = {"content": [{"type": "text", "text": "Operation not completed: invalid state, denied path or unavailable storage. Read current status; do not repeat external actions automatically."}], "isError": True}
-                        print(json.dumps({"jsonrpc": "2.0", "id": identity, "result": result}), flush=True)
+                        print(compact_json({"jsonrpc": "2.0", "id": identity, "result": result}), flush=True)
                         continue
                     if health:
                         health.update("operational", successful_tool_call=True)
-                result = {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": False}
+                result = {"content": [{"type": "text", "text": compact_json(payload)}], "isError": False}
             else:
                 response = {"jsonrpc": "2.0", "id": identity, "error": {"code": -32601, "message": "Method not found"}}
-                print(json.dumps(response), flush=True)
+                print(compact_json(response), flush=True)
                 continue
             response = {"jsonrpc": "2.0", "id": identity, "result": result}
         except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as exc:
             response = {"jsonrpc": "2.0", "id": identity, "error": {"code": -32602, "message": str(exc)[:400]}}
-        print(json.dumps(response, ensure_ascii=False), flush=True)
+        print(compact_json(response), flush=True)
     if health and health.data["status"] != "failed":
         health.update("stopped")
 

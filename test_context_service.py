@@ -315,7 +315,9 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         responses = [json.loads(x) for x in run.stdout.splitlines()]
         self.assertEqual(len(responses), 3)
-        self.assertEqual(len(responses[1]["result"]["tools"]), 7)
+        self.assertEqual({tool["name"] for tool in responses[1]["result"]["tools"]}, {
+            "context_status", "context_search", "context_read", "context_code", "context_record",
+            "context_checkpoint", "context_handoff", "context_operation"})
         status = json.loads(responses[2]["result"]["content"][0]["text"])
         self.assertEqual(status["project"], str(self.root))
 

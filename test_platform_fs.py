@@ -129,6 +129,86 @@ class NativeWindowsTests(Fixture):
     the owner comparison test still exercises GetSecurityInfo without privileges.
     """
 
+    def test_native_rename_abi_and_pinned_parent_create_replace_collision(self):
+        C = fs.C
+        pointer = C.sizeof(fs.W.HANDLE)
+        self.assertEqual(fs._Rename.root.offset, pointer)
+        self.assertEqual(fs._Rename.length.offset, 2 * pointer)
+        self.assertEqual(fs._Rename.name.offset, 2 * pointer + 4)
+        self.assertEqual(C.sizeof(fs.W.WCHAR), 2)
+        original_nt, original_win32 = fs._ntsetinfo, fs._setinfo
+        target = self.root / "docs/решение-😀.md"
+        seen = []
+
+        def native_rename(handle, iosb, buffer, length, kind):
+            self.assertEqual(kind, 10)
+            info = fs._Rename.from_buffer(buffer)
+            self.assertTrue(info.root)
+            self.assertEqual(fs._identity(info.root), parent_identity)
+            encoded = C.string_at(C.addressof(buffer) + fs._Rename.name.offset, info.length)
+            self.assertEqual(encoded, target.name.encode("utf-16-le"))
+            self.assertGreaterEqual(length, fs._Rename.name.offset + info.length)
+            self.assertGreaterEqual(length, C.sizeof(fs._Rename))
+            # Every ancestor remains pinned through the actual native call.
+            for directory in (target.parent, self.root):
+                with self.assertRaises(OSError):
+                    directory.rename(directory.with_name(directory.name + "-moved"))
+            seen.append(bool(info.replace))
+            return original_nt(handle, iosb, buffer, length, kind)
+
+        def win32_cleanup_only(handle, kind, buffer, length):
+            self.assertEqual(kind, 4, "rename must not use the Win32 wrapper")
+            return original_win32(handle, kind, buffer, length)
+
+        with fs.directory_handle(target.parent, writing=True) as parent:
+            parent_identity = fs._identity(parent)
+        with patch.object(fs, "_ntsetinfo", side_effect=native_rename), \
+                patch.object(fs, "_setinfo", side_effect=win32_cleanup_only):
+            fs.create_file(target, b"")  # Same operation used for a new SQLite DB.
+            self.assertEqual(fs.read_file(target, 100), b"")
+            with self.assertRaises(FileExistsError):
+                fs.create_file(target, b"must not replace")
+            self.assertEqual(fs.read_file(target, 100), b"")
+            fs.write_atomic(target, "новые данные".encode())
+            self.assertEqual(fs.read_file(target, 100), "новые данные".encode())
+        self.assertEqual(seen, [False, False, True])
+        self.assertEqual(list(target.parent.glob(".foundation-*")), [])
+
+    def test_native_rename_failure_preserves_target_and_removes_temporary(self):
+        target = self.root / "docs/page.md"
+        fs.create_file(target, b"original")
+        # STATUS_INVALID_PARAMETER must become WinError 87, not a false success
+        # or an error inferred from kernel32's unrelated last-error slot.
+        status = fs.W.LONG(0xC000000D).value
+        with patch.object(fs, "_ntsetinfo", return_value=status):
+            with self.assertRaises(OSError) as raised:
+                fs.write_atomic(target, b"replacement")
+        self.assertEqual(raised.exception.winerror, 87)
+        self.assertIn("0xC000000D", " ".join(raised.exception.__notes__))
+        self.assertEqual(fs.read_file(target, 100), b"original")
+        self.assertEqual(list(target.parent.glob(".foundation-*")), [])
+        missing = target.with_name("missing.md")
+        with patch.object(fs, "_ntsetinfo", return_value=status):
+            with self.assertRaises(OSError):
+                fs.create_file(missing, b"must not publish partially")
+        self.assertFalse(missing.exists())
+        self.assertEqual(list(target.parent.glob(".foundation-*")), [])
+
+    def test_native_rename_single_character_name_relative_to_parent(self):
+        # A one-WCHAR name exercises trailing struct padding. A different name
+        # in the project root catches accidental use of the wrong directory.
+        sibling = self.root / "a"
+        sibling.write_bytes(b"leave alone")
+        target = self.root / "docs/a"
+        fs.create_file(target, b"first")
+        with self.assertRaises(FileExistsError):
+            fs.create_file(target, b"second")
+        self.assertEqual(fs.read_file(target, 100), b"first")
+        fs.write_atomic(target, b"replacement")
+        self.assertEqual(fs.read_file(target, 100), b"replacement")
+        self.assertEqual(sibling.read_bytes(), b"leave alone")
+        self.assertEqual(list(target.parent.glob(".foundation-*")), [])
+
     def junction(self, path, target):
         run = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(path), str(target)],
                              capture_output=True, timeout=10)

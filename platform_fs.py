@@ -15,7 +15,8 @@ and sidecar checks before opening and before committing. No custom SQLite VFS.
 
 API references (Microsoft Learn):
  /windows/win32/api/winternl/nf-winternl-ntcreatefile
- /windows/win32/api/winbase/ns-winbase-file_rename_info
+ /windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile
+ /windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
  /windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
  /windows/win32/api/securitybaseapi/nf-securitybaseapi-getace
  /windows/win32/fileio/naming-a-file
@@ -113,6 +114,8 @@ if WINDOWS:
                     ("mask", W.DWORD), ("sid", W.DWORD)]
 
     class _Rename(C.Structure):
+        # Native FILE_RENAME_INFORMATION: the first DWORD holds the
+        # BOOLEAN/ULONG union, followed by natural HANDLE alignment.
         _fields_ = [("replace", W.DWORD), ("root", W.HANDLE),
                     ("length", W.DWORD), ("name", W.WCHAR * 1)]
 
@@ -136,6 +139,8 @@ if WINDOWS:
     _ntcreate = _bind(_ntdll, "NtCreateFile", [C.POINTER(W.HANDLE), W.DWORD, C.POINTER(_Attributes),
                     C.POINTER(_IO), C.c_void_p, W.DWORD, W.DWORD, W.DWORD, W.DWORD,
                     C.c_void_p, W.DWORD], W.LONG)
+    _ntsetinfo = _bind(_ntdll, "NtSetInformationFile",
+                       [W.HANDLE, C.POINTER(_IO), C.c_void_p, W.ULONG, C.c_int], W.LONG)
     _dos_error = _bind(_ntdll, "RtlNtStatusToDosError", [W.LONG], W.ULONG)
     _read = _bind(_kernel, "ReadFile", [W.HANDLE, C.c_void_p, W.DWORD, C.POINTER(W.DWORD), C.c_void_p], W.BOOL)
     _write = _bind(_kernel, "WriteFile", [W.HANDLE, C.c_void_p, W.DWORD, C.POINTER(W.DWORD), C.c_void_p], W.BOOL)
@@ -162,6 +167,30 @@ if WINDOWS:
         if not result:
             raise C.WinError(C.get_last_error())
         return result
+
+    def _rename_at(handle, parent, name, replace):
+        """Native rename relative to the retained parent; never re-resolve a path.
+
+        kernel32's FileRenameInfo wrapper rejected this non-NULL RootDirectory
+        with ERROR_INVALID_PARAMETER on the native Windows CI runner. The native
+        FILE_RENAME_INFORMATION contract explicitly supports this form. Its
+        information class is 10, not the Win32 FileRenameInfo value 3.
+        """
+        _component(name, True)
+        encoded = name.encode("utf-16-le")
+        size = max(C.sizeof(_Rename), _Rename.name.offset + len(encoded))
+        storage = C.create_string_buffer(size)
+        rename = _Rename.from_buffer(storage)
+        rename.replace, rename.root, rename.length = int(replace), parent, len(encoded)
+        C.memmove(C.addressof(storage) + _Rename.name.offset, encoded, len(encoded))
+        iosb = _IO()
+        status = _ntsetinfo(handle, C.byref(iosb), storage, size, 10)
+        # These handles use FILE_SYNCHRONOUS_IO_NONALERT. Only completed success
+        # permits publication; NTSTATUS is not a BOOL and not GetLastError().
+        if status != 0:
+            error = C.WinError(_dos_error(status))
+            error.add_note(f"NtSetInformationFile(FileRenameInformation): NTSTATUS 0x{status & 0xFFFFFFFF:08X}")
+            raise error
 
     def _sid_text(sid):
         if not sid or not _validsid(sid):
@@ -466,12 +495,7 @@ def _publish(path, content, mode, replace):
                         pass
                     else:
                         _close(target)
-                encoded = path.name.encode("utf-16-le")
-                storage = C.create_string_buffer(C.sizeof(_Rename) + len(encoded))
-                rename = _Rename.from_buffer(storage)
-                rename.replace, rename.root, rename.length = int(replace), parent, len(encoded)
-                C.memmove(C.addressof(storage) + _Rename.name.offset, encoded, len(encoded))
-                _ok(_setinfo(h, 3, storage, len(storage)))  # FileRenameInfo
+                _rename_at(h, parent, path.name, replace)
                 published = True
             finally:
                 try:

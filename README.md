@@ -59,6 +59,8 @@ Default paths can be overridden with `--destination` and `--codex-dir`; `CODEX_H
 
 ## Validation
 
+Run these from a source checkout (the installation ZIP does not include the CI harness):
+
 ```sh
 python3 -m unittest discover -v
 python3 ci_smoke.py

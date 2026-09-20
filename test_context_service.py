@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from context_service import Project, Scope, validate_arguments
+from platform_fs import private_directory
 
 
 class ContextTests(unittest.TestCase):
@@ -137,7 +138,9 @@ class ContextTests(unittest.TestCase):
 
     def test_state_directory_replacement_rejected(self):
         self.project.state.rename(self.base / "saved-original-state")
-        self.project.state.mkdir(mode=0o700)
+        # Keep permissions valid so this tests identity replacement on both
+        # POSIX and Windows, not an unrelated inherited Windows ACL failure.
+        private_directory(self.project.state)
         with self.assertRaisesRegex(ValueError, "replaced"):
             self.project.status()
 

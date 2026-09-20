@@ -1,62 +1,85 @@
 # Codex Context Foundation
 
-[Download the pilot package](./codex-context-foundation-0.1.0-pre3.public1.zip) · [SHA-256 checksum](./SHA256SUMS)
+Independent, local-first project memory and bounded retrieval for Codex. Not an official OpenAI product.
 
-The ZIP contains the Python source, installer, tests, README, license and integrity manifest.
+**Pre4 is a cross-platform pilot candidate.** Native Windows, Linux and macOS implementations are provided, but a passing test on one OS does not qualify the others or your Codex installation. See [Platform acceptance](https://github.com/epgfree/codex-context-foundation/actions/workflows/platforms.yml) for actual runner results. No measured subscription-quota savings are promised.
 
-Experimental, local-first context and project-memory tools for Codex. This is an independent community project, not an official OpenAI product.
+## What it does
 
-**Pilot / pre-release, not a finished autonomous context optimizer.** Token or subscription-quota savings have not been demonstrated. Exact literal searches may be more compact with `rg`.
+- Bounded project-local document/code retrieval; Markdown records with evidence references.
+- Persistent checkpoints, explicit ownership handoff and a journal that blocks uncertain repeats.
+- Per-working-copy isolation and advisory session hooks.
+- Reversible installer preserving unrelated Codex settings.
 
-## Included
-
-- Local STDIO MCP service: bounded document/code retrieval, evidence-linked Markdown records, checkpoints, coordinated handoff, and an operation journal.
-- Per-working-copy state isolation. Existing documents remain authoritative; indexes are derived data.
-- Advisory session lifecycle hooks and a reversible, versioned installer.
-- Unit tests and a SHA-256 file manifest.
-
-No user projects, conversations, runtime state, credentials, or personal configuration are distributed. There are no model API calls or dependency downloads during installation. Serena and Graphify are not installed. A legacy experimental Serena supervisor remains in `foundation.py` but is not used by the baseline service.
+Existing wiki/source documents remain authoritative. No projects, conversations, credentials, personal configuration or runtime databases are distributed. Installation does not download dependencies or call a model API. Serena and Graphify are not installed. The legacy experimental Serena supervisor is not the baseline entrypoint.
 
 ## Requirements
 
-- Python 3.11+ (not bundled), including SQLite with FTS5.
-- macOS or Linux; tests were run on macOS. Windows is not qualified.
+- Python 3.11+ with SQLite FTS5, installed separately.
 - Codex supporting STDIO MCP and lifecycle hooks.
 - Git for Git project identity checks.
+- Windows native installation uses a local NTFS volume and Windows PowerShell. Reparse points/junctions and unsafe state permissions are refused. WSL is a separate Linux installation, not the native Windows path.
+- macOS/Linux use POSIX file-descriptor-based protections.
+- Network shares and Windows device/alternate-stream paths are not supported.
 
-## Install the pilot
+## Install
 
-Download and extract the ZIP, open a terminal in its `codex-context-foundation` directory, then:
+Download an installation ZIP from this repository, extract it, and open a terminal inside its `codex-context-foundation` directory. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
+
+Windows (PowerShell):
+
+```powershell
+py -3 install.py verify
+py -3 install.py install --activate --pilot
+```
+
+macOS / Linux:
 
 ```sh
 python3 install.py verify
 python3 install.py install --activate --pilot
 ```
 
-Review the generated hook commands in Codex settings and explicitly approve only those you trust. Hooks can execute outside the sandbox. The installer does not bypass trust review, copy authentication, or force-enable hooks you disabled. Existing settings are preserved outside the managed integration. If an open task still uses the old MCP connection, reconnect this server and verify the live version.
+Python is not bundled; this is not a self-contained executable. The installer chooses the current user's directories and the running Python interpreter. It never requests administrator access or changes PowerShell execution policy. Hook approval remains an explicit Codex user action.
 
-The public packaging revision has a distinct version to avoid overwriting an existing immutable pilot release. It changes the version, public documentation and a diagnostic label; it does not upgrade any local installation automatically.
+Review the generated hooks in Codex settings before granting trust. Hooks can execute outside the sandbox. If a running task keeps an older MCP connection, reconnect this server and verify its version. Do not disable protection or trust unrelated hooks.
 
-## Verify and disconnect
+## Diagnostics and rollback
+
+Use `py -3` instead of `python3` on Windows:
 
 ```sh
-python3 -m unittest -q test_foundation test_install test_context_service test_lifecycle
 python3 install.py doctor
 python3 install.py disconnect
 ```
 
-`verify` checks package integrity, not publisher authenticity. `doctor` checks local configuration, not live MCP connectivity or hook trust. `disconnect` removes this integration without deleting project files or saved state. Review `python3 install.py --help` for custom install locations.
+`doctor` is read-only and does not prove live MCP connectivity or hook trust. `disconnect` removes the managed integration, not state or projects. Old versioned releases are preserved. For a previous release, run its installer with explicit pilot activation and review changed hooks again.
 
-## Limits and safety
+Default paths can be overridden with `--destination` and `--codex-dir`; `CODEX_HOME` is honored. Use separate installations for Windows and WSL. Do not manually share their SQLite state.
 
-- Hooks store bounded event metadata, not full transcripts, tool output or commands. Meaningful notes and checkpoints still require agent actions. Shell edits are not fully tracked.
-- Handoff coordinates ownership but does not create Codex tasks, authenticate callers, or guarantee automatic resumption. Host tools and sometimes user approval are needed.
-- Existing canonical operation journals are not replaced. Some worktree/journal configurations reject a second journal until routing is configured; this is not a universal journal adapter.
-- Source reads reject symlinks, hard links, hidden/private paths, large files and unsupported types within the service. This is not an OS sandbox or protection against a malicious process under the same user account.
-- Evidence references are not automatically verified. No guarantee of zero information loss or regression prevention is made.
-- Compatibility with future Codex versions and every platform is not guaranteed. No online update monitor is included.
-- The predecessor pilot passed local tests and live MCP/session-hook checks. Those results do not qualify every subsequent build or all lifecycle events. Test this package before relying on it.
+## Validation
 
-## License
+```sh
+python3 -m unittest discover -v
+python3 ci_smoke.py
+```
 
-MIT. See LICENSE.
+CI runs Python 3.11 and 3.14 on Windows, Linux and macOS. Tests cover packaged installation into a temporary profile, unchanged unrelated configuration, UTF-8 paths and memory, real STDIO restarts, handoff and disconnect. Windows-specific tests cover filesystem and native hook execution. OS-specific skips are reported, not counted as proof of that platform.
+
+The predecessor pilot passed 78 local unit tests. Cross-platform acceptance must come from the new matrix, not that historical count. CI does not run the full Codex desktop app or bypass its approval system.
+
+## Limits
+
+- Hooks keep bounded metadata, not transcripts, tool output or commands. Agents must still write meaningful decisions and checkpoints. Shell edits are not fully tracked.
+- Handoff does not create new Codex tasks or start model turns. Owner strings coordinate tasks, not authenticate users. Fully automatic task rotation is not implemented.
+- Evidence references are not independently verified. No guarantee of zero information loss or automatic regression prevention is made.
+- Existing operation journals are not replaced; ambiguous worktree routing fails closed.
+- File-scope and ACL checks are not an OS sandbox against administrators or malicious processes running as the same user.
+- Exact literal search may be smaller with `rg`; this service should not replace every search.
+- Future Codex compatibility is not guaranteed. App-version discovery outside macOS may be unavailable; no online update monitor is included.
+
+## Sources and license
+
+[OpenAI hook contract](https://learn.chatgpt.com/docs/hooks) describes Windows command overrides and user trust. [GitHub Python CI](https://docs.github.com/en/actions/tutorials/build-and-test-code/python) describes the platform matrix.
+
+MIT — see LICENSE.

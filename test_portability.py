@@ -60,6 +60,10 @@ class PortabilityTests(unittest.TestCase):
             response = json.loads(result.stdout)
             self.assertEqual(response["input"], "Русский ввод")
             self.assertEqual(response["args"], ["--state-dir", str(root / "Память")])
+            script.write_text("import sys\nsys.exit(9)\n", encoding="utf-8")
+            failure = subprocess.run(command.split(), input="", text=True, encoding="utf-8",
+                                     capture_output=True, timeout=20)
+            self.assertEqual(failure.returncode, 9, failure.stderr)
 
     @unittest.skipUnless(sys.platform == "win32", "requires native Windows")
     def test_windows_case_alias_same_identity(self):

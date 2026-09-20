@@ -225,7 +225,28 @@ class NativeWindowsTests(Fixture):
         finally:
             fs._localfree(sd)
 
+    def owner_of_handle(self, handle):
+        C = fs.C
+        owner, sd = C.c_void_p(), C.c_void_p()
+        result = fs._getsecurity(handle, 1, 1, C.byref(owner), None, None, None, C.byref(sd))
+        if result:
+            raise C.WinError(result)
+        try:
+            return fs._sid_text(owner)
+        finally:
+            fs._localfree(sd)
+
+    def token_default_owner(self):
+        token = fs.W.HANDLE()
+        fs._ok(fs._opentoken(fs._process(), 0x0008, fs.C.byref(token)))
+        try:
+            owner = fs._token_buffer(token, 4)
+            return fs._sid_text(fs.C.c_void_p.from_buffer(owner).value)
+        finally:
+            fs._close(token)
+
     def test_private_acl_created_and_inherited_by_real_sqlite_sidecars(self):
+        default_owner = self.token_default_owner()
         project = Project(self.root, self.base / "private-state")
         with fs.directory_handle(project.state) as h:
             fs._check_acl(h)
@@ -235,9 +256,98 @@ class NativeWindowsTests(Fixture):
                 path = project.database.with_name(project.database.name + suffix)
                 self.assertTrue(path.exists(), suffix)
                 with fs.directory_handle(path.parent) as parent:
-                    h = fs._open_child(parent, path.name, directory=False, private=True, sharing=7)
-                    fs._close(h)
+                    h = fs._open_child(parent, path.name, directory=False, private=True, sharing=7,
+                                       allow_token_owner=bool(suffix))
+                    try:
+                        self.assertEqual(self.owner_of_handle(h), default_owner if suffix else fs._user_sid())
+                    finally:
+                        fs._close(h)
         self.assertEqual(Project(self.root, self.base / "private-state").status()["counts"]["notes"], 0)
+        self.assertEqual(self.token_default_owner(), default_owner, "process token must not change")
+
+    def test_elevated_default_owner_requires_all_token_evidence(self):
+        # Native SID structures, but controlled token query results: exercise
+        # negative policy cases even when CI always runs with an elevated token.
+        C, W = fs.C, fs.W
+        convert = fs._bind(fs._security, "ConvertStringSidToSidW",
+                           [W.LPCWSTR, C.POINTER(C.c_void_p)], W.BOOL)
+        user, admin, other = fs._user_sid(), "S-1-5-32-544", "S-1-5-32-545"
+        pointers = {}
+        for sid in (user, admin, other):
+            ptr = C.c_void_p()
+            fs._ok(convert(sid, C.byref(ptr)))
+            pointers[sid] = ptr.value
+            self.addCleanup(fs._localfree, ptr)
+
+        def sid_buffer(sid):
+            buf = C.create_string_buffer(C.sizeof(fs._SidAttributes))
+            C.c_void_p.from_buffer(buf).value = pointers[sid]
+            return buf
+
+        cases = [
+            (user, admin, 1, admin, 0x0C, admin),  # elevated owner-capable admin
+            (user, admin, 0, admin, 0x0C, None),  # non-elevated
+            (user, user, 1, admin, 0x0C, None),   # admin is not TokenOwner
+            (user, other, 1, other, 0x0C, None),  # arbitrary default-owner group
+            (user, admin, 1, admin, 0x04, None),  # enabled, not owner-capable
+            (user, admin, 1, admin, 0x08, None),  # owner-capable, not enabled
+            (user, admin, 1, admin, 0x1C, None),  # deny-only fails closed
+            (user, admin, 1, other, 0x0C, None),  # admin group absent
+            (other, admin, 1, admin, 0x0C, None), # different token user
+        ]
+        for token_user, owner, elevated, group_sid, flags, expected in cases:
+            with self.subTest(owner=owner, elevated=elevated, flags=flags, group=group_sid, user=token_user):
+                groups = C.create_string_buffer(C.sizeof(fs._TokenGroups))
+                C.cast(groups, C.POINTER(fs._TokenGroups)).contents.count = 1
+                group = fs._SidAttributes.from_buffer(groups, fs._TokenGroups.groups.offset)
+                group.sid, group.attributes = pointers[group_sid], flags
+                elevation = C.create_string_buffer(C.sizeof(W.DWORD))
+                W.DWORD.from_buffer(elevation).value = elevated
+                values = {1: sid_buffer(token_user), 4: sid_buffer(owner), 20: elevation, 2: groups}
+                with patch.object(fs, "_token_buffer", side_effect=lambda token, kind: values[kind]):
+                    self.assertEqual(fs._elevated_default_owner(user), expected)
+
+    def test_real_foreign_system_file_owner_is_not_a_sidecar_owner(self):
+        # Read only the security descriptor of an OS-owned file. This exercises
+        # a genuine foreign owner without enabling privileges or changing tokens.
+        path = Path(os.environ["SystemRoot"]) / "System32/ntdll.dll"
+        h = fs._create(str(path), 0x00020080, 7, None, 3, 0x00200000, None)
+        if h == fs.W.HANDLE(-1).value:
+            raise fs.C.WinError(fs.C.get_last_error())
+        try:
+            owner = self.owner_of_handle(h)
+            if owner in (fs._user_sid(), "S-1-5-32-544"):
+                self.skipTest("OS fixture has no foreign owner on this Windows image")
+            # Even an arbitrary default-owner return must not allow a foreign SID.
+            with patch.object(fs, "_elevated_default_owner", return_value=owner):
+                with self.assertRaisesRegex(ValueError, "foreign owner"):
+                    fs._check_acl(h, allow_token_owner=True)
+        finally:
+            fs._close(h)
+
+    def test_default_owner_exception_does_not_allow_admin_acl_or_main_database(self):
+        project = Project(self.root, self.base / "private-state")
+        user = fs._user_sid()
+        sidecar = project.database.with_name(project.database.name + "-journal")
+        # Normal CreateFile creation uses the actual TokenOwner on this runner.
+        sidecar.write_bytes(b"")
+        try:
+            with fs.database_guard(project.database, project.state_identity):
+                pass
+            self.set_security(sidecar, f"D:P(A;;FA;;;{user})(A;;FR;;;BA)")
+            with self.assertRaisesRegex(ValueError, "database or sidecar"):
+                with fs.database_guard(project.database, project.state_identity):
+                    pass
+        finally:
+            sidecar.unlink()
+        # When the actual default owner differs, an identically created main DB
+        # must still be rejected. The normal-token case is covered above too.
+        if self.token_default_owner() != user:
+            main = project.state / "other.sqlite3"
+            main.write_bytes(b"")
+            with self.assertRaisesRegex(ValueError, "database or sidecar"):
+                with fs.database_guard(main, project.state_identity):
+                    pass
 
     def test_broad_and_null_dacl_rejected_without_repair(self):
         user = fs._user_sid()

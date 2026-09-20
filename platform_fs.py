@@ -3,8 +3,12 @@
 Windows uses single-component NtCreateFile opens relative to retained handles,
 FILE_OPEN_REPARSE_POINT and handle metadata, never resolve/lstat as its security
 boundary. Private objects require the process user's owner SID and a DACL whose
-only allow trustees are that user and SYSTEM. Unknown ACEs fail closed. Newly
-created private objects have a protected, inheritable user-only DACL.
+only allow trustees are that user and SYSTEM. SQLite-created sidecars alone may
+also have the elevated token's verified Administrators default owner (TokenOwner,
+TokenElevation and enabled owner-capable TokenGroups must agree). This is not an
+ACL grant to Administrators; directories and the main DB still require TokenUser.
+Unknown ACEs fail closed. Newly created private objects have a protected,
+inheritable user-only DACL. The process token is never modified.
 
 Windows intentionally supports local fixed NTFS volumes only; UNC, device paths,
 ADS, DOS aliases, reparse points (including cloud placeholders), and other file
@@ -19,6 +23,8 @@ API references (Microsoft Learn):
  /windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
  /windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
  /windows/win32/api/securitybaseapi/nf-securitybaseapi-getace
+ /windows/win32/api/winnt/ns-winnt-token_owner
+ /windows/win32/api/winnt/ns-winnt-token_groups
  /windows/win32/fileio/naming-a-file
 """
 from __future__ import annotations
@@ -108,6 +114,12 @@ if WINDOWS:
     class _ACL(C.Structure):
         _fields_ = [("revision", W.BYTE), ("reserved", W.BYTE), ("size", W.WORD),
                     ("count", W.WORD), ("reserved2", W.WORD)]
+
+    class _SidAttributes(C.Structure):
+        _fields_ = [("sid", C.c_void_p), ("attributes", W.DWORD)]
+
+    class _TokenGroups(C.Structure):
+        _fields_ = [("count", W.DWORD), ("groups", _SidAttributes * 1)]
 
     class _ACE(C.Structure):
         _fields_ = [("kind", W.BYTE), ("flags", W.BYTE), ("size", W.WORD),
@@ -202,17 +214,58 @@ if WINDOWS:
         finally:
             _localfree(text)
 
+    def _token_buffer(token, kind):
+        length = W.DWORD()
+        _tokeninfo(token, kind, None, 0, C.byref(length))
+        if not length.value:
+            raise C.WinError(C.get_last_error())
+        buf = C.create_string_buffer(length.value)
+        _ok(_tokeninfo(token, kind, buf, len(buf), C.byref(length)))
+        return buf
+
     def _user_sid():
         token = W.HANDLE()
         _ok(_opentoken(_process(), 0x0008, C.byref(token)))  # TOKEN_QUERY
         try:
-            length = W.DWORD()
-            _tokeninfo(token, 1, None, 0, C.byref(length))  # TokenUser
-            if not length.value:
-                raise C.WinError(C.get_last_error())
-            buf = C.create_string_buffer(length.value)
-            _ok(_tokeninfo(token, 1, buf, len(buf), C.byref(length)))
+            buf = _token_buffer(token, 1)  # TokenUser
             return _sid_text(C.c_void_p.from_buffer(buf).value)
+        finally:
+            _close(token)
+
+    def _elevated_default_owner(user):
+        """Return the narrowly verified elevated default owner, otherwise None.
+
+        Inherited DACLs do not determine ownership: SQLite's CreateFile calls
+        omit an explicit owner and Windows uses TokenOwner. An elevated token
+        can use Administrators here even when its TokenUser is an individual.
+        Read all evidence from one query-only process token; never change it or
+        accept arbitrary group memberships/default owners as private owners.
+        """
+        token = W.HANDLE()
+        _ok(_opentoken(_process(), 0x0008, C.byref(token)))
+        try:
+            token_user = _token_buffer(token, 1)
+            if _sid_text(C.c_void_p.from_buffer(token_user).value) != user:
+                return None
+            owner_buf = _token_buffer(token, 4)  # TokenOwner
+            owner = _sid_text(C.c_void_p.from_buffer(owner_buf).value)
+            if owner != "S-1-5-32-544":  # Builtin Administrators only.
+                return None
+            elevation = _token_buffer(token, 20)  # TokenElevation
+            if not W.DWORD.from_buffer(elevation).value:
+                return None
+            groups = _token_buffer(token, 2)  # TokenGroups
+            count = W.DWORD.from_buffer(groups).value
+            start, stride = _TokenGroups.groups.offset, C.sizeof(_SidAttributes)
+            if start + count * stride > len(groups):
+                raise ValueError("Invalid token group buffer")
+            for index in range(count):
+                group = _SidAttributes.from_buffer(groups, start + index * stride)
+                # SE_GROUP_ENABLED | SE_GROUP_OWNER, never DENY_ONLY.
+                if (_sid_text(group.sid) == owner and group.attributes & 0x0C == 0x0C
+                        and not group.attributes & 0x10):
+                    return owner
+            return None
         finally:
             _close(token)
 
@@ -226,7 +279,7 @@ if WINDOWS:
         finally:
             _localfree(sd)
 
-    def _check_acl(handle):
+    def _check_acl(handle, *, allow_token_owner=False):
         owner, acl, sd = C.c_void_p(), C.c_void_p(), C.c_void_p()
         result = _getsecurity(handle, 1, 0x00000005, C.byref(owner), None,
                               C.byref(acl), None, C.byref(sd))  # SE_FILE_OBJECT, OWNER|DACL
@@ -234,8 +287,12 @@ if WINDOWS:
             raise C.WinError(result)
         try:
             user = _user_sid()
-            if _sid_text(owner) != user:
-                raise ValueError("Private state has a foreign owner")
+            owner_sid = _sid_text(owner)
+            if owner_sid != user:
+                if (not allow_token_owner or owner_sid != "S-1-5-32-544"
+                        or _metadata(handle).attributes & 0x10
+                        or owner_sid != _elevated_default_owner(user)):
+                    raise ValueError("Private state has a foreign owner")
             if not acl or not _validacl(acl):
                 raise ValueError("Private state requires an explicit valid DACL")
             header = C.cast(acl, C.POINTER(_ACL)).contents
@@ -283,7 +340,7 @@ if WINDOWS:
         return info.volume, (info.index_high << 32) | info.index_low
 
     def _open_child(parent, name, *, directory=None, create=False, private=False,
-                    write=False, sharing=1):
+                    write=False, sharing=1, allow_token_owner=False):
         _component(name, True)
         buf = C.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
@@ -316,7 +373,7 @@ if WINDOWS:
         try:
             _metadata(handle, directory)
             if private:
-                _check_acl(handle)
+                _check_acl(handle, allow_token_owner=allow_token_owner)
             return handle.value
         except BaseException:
             _close(handle)
@@ -575,7 +632,10 @@ def database_guard(path, identity):
                 try:
                     if WINDOWS:
                         # SQLite needs write/delete sharing for its own sidecars.
-                        h = _open_child(parent, name, directory=False, private=True, sharing=7)
+                        # Only sidecars beneath this strictly user-owned, private,
+                        # pinned directory may use the elevated default owner.
+                        h = _open_child(parent, name, directory=False, private=True, sharing=7,
+                                        allow_token_owner=bool(suffix))
                         _close(h)
                     else:
                         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)

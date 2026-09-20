@@ -351,10 +351,10 @@ class NativeWindowsTests(Fixture):
 
     def test_broad_and_null_dacl_rejected_without_repair(self):
         user = fs._user_sid()
-        for dacl in (f"D:P(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", "D:NO_ACCESS_CONTROL",
-                     f"D:P(A;OICI;FA;;;{user})(A;OIIO;FR;;;BU)"):
+        for index, dacl in enumerate((f"D:P(A;OICI;FA;;;{user})(A;OICI;FR;;;WD)", "D:NO_ACCESS_CONTROL",
+                                     f"D:P(A;OICI;FA;;;{user})(A;OIIO;FR;;;BU)")):
             with self.subTest(dacl=dacl):
-                path, _ = fs.private_directory(self.base / ("private-" + str(len(dacl))))
+                path, _ = fs.private_directory(self.base / f"private-{index}")
                 self.set_security(path, dacl)
                 with self.assertRaisesRegex(ValueError, "private|DACL"):
                     fs.private_directory(path)

@@ -2,7 +2,7 @@
 
 Independent, local-first project memory and bounded retrieval for Codex. Not an official OpenAI product.
 
-**Pre4 is a cross-platform pilot candidate.** Native Windows, Linux and macOS implementations are provided, but a passing test on one OS does not qualify the others or your Codex installation. See [Platform acceptance](https://github.com/epgfree/codex-context-foundation/actions/workflows/platforms.yml) for actual runner results. No measured subscription-quota savings are promised.
+**Pre4 is a cross-platform pilot.** Native Windows, Linux and macOS passed the [six-job acceptance matrix](https://github.com/epgfree/codex-context-foundation/actions/runs/35506131849) on Python 3.11 and 3.14. This verifies the package and its tests, not a full Codex desktop session on every OS. No measured subscription-quota savings are promised.
 
 ## What it does
 
@@ -24,7 +24,7 @@ Existing wiki/source documents remain authoritative. No projects, conversations,
 
 ## Install
 
-Download an installation ZIP from this repository, extract it, and open a terminal inside its `codex-context-foundation` directory. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
+Download [the pre4 installation ZIP](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre4.zip), compare its SHA-256 with [SHA256SUMS-pre4.txt](https://github.com/epgfree/codex-context-foundation/blob/main/SHA256SUMS-pre4.txt), extract it, and open a terminal inside its `codex-context-foundation` directory. The older pre3 archive is retained for reference and does not support native Windows. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
 
 Windows (PowerShell):
 
@@ -68,7 +68,7 @@ python3 ci_smoke.py
 
 CI runs Python 3.11 and 3.14 on Windows, Linux and macOS. Tests cover packaged installation into a temporary profile, unchanged unrelated configuration, UTF-8 paths and memory, real STDIO restarts, handoff and disconnect. Windows-specific tests cover filesystem and native hook execution. OS-specific skips are reported, not counted as proof of that platform.
 
-The predecessor pilot passed 78 local unit tests. Cross-platform acceptance must come from the new matrix, not that historical count. CI does not run the full Codex desktop app or bypass its approval system.
+The pre4 matrix runs 107 unit tests per job plus the packaged integration scenario. Platform-specific skips remain explicit (for example, Windows API tests are skipped on POSIX). CI does not run the full Codex desktop app or bypass its approval system. Windows runners use an elevated CI account; the installer itself never requests elevation. A user's actual desktop installation still requires normal hook review and a live connection check.
 
 ## Limits
 

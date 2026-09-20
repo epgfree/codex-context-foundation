@@ -26,7 +26,8 @@ class RetrievalTests(unittest.TestCase):
 
     def document(self, name, text="orchid same ranked text"):
         target = self.root / "docs" / name
-        target.write_text(text, encoding="utf-8")
+        # Fixtures compare exact stored text; do not translate LF to CRLF.
+        target.write_text(text, encoding="utf-8", newline="")
         return target
 
     def note(self, identity, body="orchid legacy body", title="title", evidence="source", created=1):
@@ -299,7 +300,8 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(page["coverage"]["coverage_limited"])
         self.assertEqual(page["coverage"]["indexed_files"], 2)
         self.assertIn("byte_budget", page["coverage"])
-        self.document("nul.md", "bad\0text")
+        # NUL (including nul.md) is a Windows device name, not a file fixture.
+        self.document("embedded-zero.md", "bad\0text")
         page = self.project.search("orchid")
         self.assertEqual(page["coverage"]["skipped_files"], 1)
 

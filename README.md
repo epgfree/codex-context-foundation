@@ -2,7 +2,7 @@
 
 Independent, local-first project memory and bounded retrieval for Codex. Not an official OpenAI product.
 
-**Pre5 is a locally validated retrieval pilot.** macOS/Python 3.14 completed 130 discovered tests (110 executed, 20 Windows-specific skips) and the packaged integration scenario, including paged search/read across process restarts. The previous pre4 release passed the [six-job acceptance matrix](https://github.com/epgfree/codex-context-foundation/actions/runs/35506131849) on Windows, Linux and macOS with Python 3.11 and 3.14. That result does not qualify pre5 on those platforms or prove full Codex desktop integration. No measured subscription-quota savings are promised.
+**Pre5.1 is a retrieval pilot.** It corrects two Windows test-fixture issues in pre5: a reserved filename and unintended newline conversion. Runtime behavior and filesystem protections are unchanged, apart from the reported version. macOS/Python 3.14 completed 130 discovered tests (110 executed, 20 Windows-specific skips) and the packaged integration scenario. Native cross-platform qualification for this revision must be checked in [Actions](https://github.com/epgfree/codex-context-foundation/actions). Passing CI does not prove full Codex desktop integration on every OS. No measured subscription-quota savings are promised.
 
 ## What it does
 
@@ -24,7 +24,7 @@ Existing wiki/source documents remain authoritative. No projects, conversations,
 
 ## Install
 
-Download [the latest pre5 installation ZIP](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre5.zip) and verify [SHA256SUMS-pre5.txt](https://github.com/epgfree/codex-context-foundation/blob/main/SHA256SUMS-pre5.txt). Extract it and run the commands below inside its `codex-context-foundation` folder. The ZIP is the exact locally tested package; its bundled README preserves the documentation snapshot at build time. This repository README carries publication and CI updates. The [pre4 archive](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre4.zip) remains available for rollback. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
+Download [the latest pre5.1 installation ZIP](https://github.com/epgfree/codex-context-foundation/raw/refs/heads/main/codex-context-foundation-0.1.0-pre5.1.zip) and verify [SHA256SUMS-pre5.1.txt](https://github.com/epgfree/codex-context-foundation/blob/main/SHA256SUMS-pre5.1.txt). Extract it and run the commands below inside its `codex-context-foundation` folder. Previous archives are retained for rollback; pre5 has known Windows test-fixture failures and is superseded by pre5.1. For a source checkout, first run `python bundle.py package.zip` and extract the generated package.
 
 Windows (PowerShell):
 

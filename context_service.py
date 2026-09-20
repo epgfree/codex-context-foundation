@@ -23,7 +23,7 @@ from foundation import Health, app_version, project_key, project_root
 from platform_fs import (create_file, database_guard, is_directory, list_directory,
                          private_directory, read_file, reject_linked_path, relative_parts)
 
-VERSION = "0.1.0-pre5"
+VERSION = "0.1.0-pre5.1"
 SKIP = {".git", ".env", ".venv", "node_modules", "dist", "build", "data", "private", "secrets", "reports", "coverage", "__pycache__", ".promotion"}
 DOC_ROOTS = ("docs", "knowledge", "wiki")
 CODE_ROOTS = ("src", "backend/src", "backend/tests", "apps/web/src", "scripts", "tests")
